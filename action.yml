@@ -47,13 +47,11 @@ runs:
   steps:
     - name: Checkout repository
       uses: actions/checkout@v4
-      shell: bash
 
     - name: Setup Node.js
       uses: actions/setup-node@v4
       with:
         node-version: ${{ inputs.node-version }}
-      shell: bash
 
     - name: Install postman-to-k6 converter
       run: |
