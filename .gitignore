@@ -9,9 +9,12 @@ k6-script*.js
 *.backup
 
 # Test results
-*.json
 results/
 k6-results/
+# Ignore test result JSON files but keep package.json
+*.results.json
+*results*.json
+summary.json
 
 # OS files
 .DS_Store

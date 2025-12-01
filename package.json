@@ -1,0 +1,23 @@
+{
+  "name": "postman-to-k6-github-action",
+  "version": "1.0.0",
+  "description": "GitHub Action to convert Postman collections to k6 scripts and execute them with load profiles",
+  "main": "action.yml",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "github-action",
+    "postman",
+    "k6",
+    "load-testing",
+    "performance-testing"
+  ],
+  "author": "",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/your-org/postman-to-k6-action.git"
+  }
+}
+
