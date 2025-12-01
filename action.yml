@@ -1,0 +1,245 @@
+name: 'Postman to k6 Load Testing'
+description: 'Convert Postman collections to k6 scripts and execute them with configurable load profiles'
+author: 'Your Name'
+
+inputs:
+  postman-collection:
+    description: 'Path to Postman collection JSON file'
+    required: true
+  load-profile:
+    description: 'Load profile type (smoke, load, stress, or spike)'
+    required: false
+    default: 'smoke'
+  runner-label:
+    description: 'GitHub runner label for distributed execution (optional)'
+    required: false
+    default: ''
+  k6-options:
+    description: 'Additional k6 CLI options (optional)'
+    required: false
+    default: ''
+  environment-file:
+    description: 'Path to Postman environment file (optional)'
+    required: false
+    default: ''
+  profiles-config:
+    description: 'Path to load profiles configuration YAML file'
+    required: false
+    default: 'profiles/load-profiles.yaml'
+  node-version:
+    description: 'Node.js version to use for conversion'
+    required: false
+    default: '18'
+
+outputs:
+  k6-script-path:
+    description: 'Path to generated k6 script'
+    value: ${{ steps.generate-script.outputs.script-path }}
+  test-status:
+    description: 'Success/failure status of the test'
+    value: ${{ steps.run-k6.outputs.status }}
+  metrics-url:
+    description: 'Link to metrics if using k6 cloud'
+    value: ${{ steps.run-k6.outputs.metrics-url }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      shell: bash
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ inputs.node-version }}
+      shell: bash
+
+    - name: Install postman-to-k6 converter
+      run: |
+        npm install -g @apideck/postman-to-k6
+      shell: bash
+
+    - name: Install yq for YAML parsing
+      run: |
+        curl -sSfL https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -o /usr/local/bin/yq
+        chmod +x /usr/local/bin/yq
+      shell: bash
+
+    - name: Validate Postman collection
+      id: validate-collection
+      run: |
+        if [ ! -f "${{ inputs.postman-collection }}" ]; then
+          echo "Error: Postman collection file not found at ${{ inputs.postman-collection }}"
+          exit 1
+        fi
+        
+        # Validate JSON format
+        if ! jq empty "${{ inputs.postman-collection }}" 2>/dev/null; then
+          echo "Error: Invalid JSON format in Postman collection"
+          exit 1
+        fi
+        
+        echo "Postman collection validated successfully"
+      shell: bash
+
+    - name: Convert Postman collection to k6 script
+      id: generate-script
+      run: |
+        COLLECTION_FILE="${{ inputs.postman-collection }}"
+        OUTPUT_FILE="k6-script-$(date +%s).js"
+        
+        ENV_FLAG=""
+        if [ -n "${{ inputs.environment-file }}" ] && [ -f "${{ inputs.environment-file }}" ]; then
+          ENV_FLAG="--environment ${{ inputs.environment-file }}"
+        fi
+        
+        echo "Converting Postman collection to k6 script..."
+        postman-to-k6 "$COLLECTION_FILE" -o "$OUTPUT_FILE" $ENV_FLAG
+        
+        if [ ! -f "$OUTPUT_FILE" ]; then
+          echo "Error: Failed to generate k6 script"
+          exit 1
+        fi
+        
+        echo "k6 script generated: $OUTPUT_FILE"
+        echo "script-path=$OUTPUT_FILE" >> $GITHUB_OUTPUT
+      shell: bash
+
+    - name: Setup k6
+      uses: grafana/setup-k6-action@v1
+
+    - name: Prepare load profile configuration
+      id: prepare-profile
+      run: |
+        PROFILE="${{ inputs.load-profile }}"
+        PROFILES_CONFIG="${{ inputs.profiles-config }}"
+        
+        if [ ! -f "$PROFILES_CONFIG" ]; then
+          echo "Warning: Profiles config not found, using default smoke profile"
+          echo "k6-flags=--vus 5 --duration 1m" >> $GITHUB_OUTPUT
+          exit 0
+        fi
+        
+        # Check if profile exists
+        PROFILE_EXISTS=$(yq eval ".profiles.$PROFILE" "$PROFILES_CONFIG" 2>/dev/null)
+        
+        if [ "$PROFILE_EXISTS" == "null" ] || [ -z "$PROFILE_EXISTS" ]; then
+          echo "Warning: Profile '$PROFILE' not found in config, falling back to smoke"
+          PROFILE="smoke"
+        fi
+        
+        echo "profile=$PROFILE" >> $GITHUB_OUTPUT
+        
+        # Generate stages array for k6 as proper JSON
+        STAGES_COUNT=$(yq eval ".profiles.$PROFILE.stages | length" "$PROFILES_CONFIG")
+        
+        if [ "$STAGES_COUNT" -gt 0 ]; then
+          # Use yq to output proper JSON for stages
+          STAGES_JSON=$(yq eval -o=json ".profiles.$PROFILE.stages" "$PROFILES_CONFIG")
+          
+          echo "stages-json=$STAGES_JSON" >> $GITHUB_OUTPUT
+          
+          # Use yq to output proper JSON for thresholds
+          THRESHOLDS_JSON=$(yq eval -o=json ".profiles.$PROFILE.thresholds" "$PROFILES_CONFIG")
+          
+          echo "thresholds-json=$THRESHOLDS_JSON" >> $GITHUB_OUTPUT
+        fi
+      shell: bash
+
+    - name: Merge k6 script with profile configuration
+      id: merge-script
+      run: |
+        SCRIPT_FILE="${{ steps.generate-script.outputs.script-path }}"
+        STAGES_JSON="${{ steps.prepare-profile.outputs.stages-json }}"
+        THRESHOLDS_JSON="${{ steps.prepare-profile.outputs.thresholds-json }}"
+        PROFILE_NAME="${{ inputs.load-profile }}"
+        
+        if [ -z "$STAGES_JSON" ] || [ "$STAGES_JSON" == "null" ]; then
+          echo "No profile stages found, using original script"
+          echo "final-script=$SCRIPT_FILE" >> $GITHUB_OUTPUT
+          exit 0
+        fi
+        
+        # Try to find merge script in multiple locations
+        MERGE_SCRIPT=""
+        for path in "scripts/merge-k6-options.js" "${{ github.action_path }}/scripts/merge-k6-options.js" "./scripts/merge-k6-options.js"; do
+          if [ -f "$path" ]; then
+            MERGE_SCRIPT="$path"
+            break
+          fi
+        done
+        
+        if [ -n "$MERGE_SCRIPT" ] && [ -f "$MERGE_SCRIPT" ]; then
+          echo "Using merge script: $MERGE_SCRIPT"
+          node "$MERGE_SCRIPT" "$SCRIPT_FILE" "$STAGES_JSON" "$THRESHOLDS_JSON" "$PROFILE_NAME"
+        else
+          echo "Warning: merge-k6-options.js not found, using inline merge logic"
+          # Fallback: Use inline Node.js to merge options
+          node -e "
+            const fs = require('fs');
+            let content = fs.readFileSync('$SCRIPT_FILE', 'utf8');
+            const stages = JSON.parse('$STAGES_JSON');
+            const thresholds = JSON.parse('$THRESHOLDS_JSON');
+            const optionsBlock = \`// Load profile: $PROFILE_NAME
+        export const options = {
+          stages: \${JSON.stringify(stages, null, 2)},
+          thresholds: \${JSON.stringify(thresholds, null, 2)},
+        };\`;
+            
+            if (/export\\s+(const|let|var)\\s+options\\s*=/.test(content)) {
+              content = content.replace(/export\\s+(const|let|var)\\s+options\\s*=\\s*\\{[^}]*\\};?/s, optionsBlock);
+            } else {
+              const lines = content.split('\\n');
+              let lastImport = -1;
+              for (let i = 0; i < lines.length; i++) {
+                if (/^(import|const.*require|export.*from)/.test(lines[i])) lastImport = i;
+              }
+              if (lastImport >= 0) {
+                lines.splice(lastImport + 1, 0, '', optionsBlock);
+                content = lines.join('\\n');
+              } else {
+                content = optionsBlock + '\\n\\n' + content;
+              }
+            }
+            fs.writeFileSync('$SCRIPT_FILE', content, 'utf8');
+          "
+        fi
+        
+        echo "final-script=$SCRIPT_FILE" >> $GITHUB_OUTPUT
+      shell: bash
+
+    - name: Run k6 test
+      id: run-k6
+      run: |
+        SCRIPT_FILE="${{ steps.merge-script.outputs.final-script }}"
+        
+        # Fallback to original script if merge didn't work
+        if [ ! -f "$SCRIPT_FILE" ]; then
+          SCRIPT_FILE="${{ steps.generate-script.outputs.script-path }}"
+        fi
+        
+        ADDITIONAL_OPTIONS="${{ inputs.k6-options }}"
+        
+        echo "Running k6 test with profile: ${{ inputs.load-profile }}"
+        echo "Script: $SCRIPT_FILE"
+        
+        # Run k6 and capture output
+        if k6 run $ADDITIONAL_OPTIONS "$SCRIPT_FILE"; then
+          echo "status=success" >> $GITHUB_OUTPUT
+        else
+          echo "status=failure" >> $GITHUB_OUTPUT
+          exit 1
+        fi
+      shell: bash
+
+    - name: Upload k6 results
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: k6-results-${{ inputs.load-profile }}-${{ github.run_id }}
+        path: |
+          k6-script*.js
+          *.json
+        retention-days: 30
+

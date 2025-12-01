@@ -1,0 +1,75 @@
+profiles:
+  smoke:
+    name: "Smoke Test"
+    description: "Quick validation test to verify basic functionality"
+    stages:
+      - duration: "1m"
+        target: 5
+        rampUp: "10s"
+    thresholds:
+      http_req_duration: ["p(95)<1000"]
+      http_req_failed: ["rate<0.01"]
+      iteration_duration: ["p(95)<2000"]
+  
+  load:
+    name: "Load Test"
+    description: "Test system under expected normal load conditions"
+    stages:
+      - duration: "2m"
+        target: 10
+        rampUp: "30s"
+      - duration: "5m"
+        target: 50
+        rampUp: "1m"
+      - duration: "2m"
+        target: 0
+        rampDown: "30s"
+    thresholds:
+      http_req_duration: ["p(95)<2000"]
+      http_req_failed: ["rate<0.05"]
+      iteration_duration: ["p(95)<5000"]
+  
+  stress:
+    name: "Stress Test"
+    description: "Test system limits and breaking points"
+    stages:
+      - duration: "2m"
+        target: 50
+        rampUp: "1m"
+      - duration: "5m"
+        target: 100
+        rampUp: "2m"
+      - duration: "5m"
+        target: 200
+        rampUp: "3m"
+      - duration: "3m"
+        target: 0
+        rampDown: "2m"
+    thresholds:
+      http_req_duration: ["p(95)<5000"]
+      http_req_failed: ["rate<0.10"]
+      iteration_duration: ["p(95)<10000"]
+  
+  spike:
+    name: "Spike Test"
+    description: "Simulate sudden traffic surge to test system resilience"
+    stages:
+      - duration: "30s"
+        target: 10
+        rampUp: "10s"
+      - duration: "30s"
+        target: 100
+        rampUp: "10s"
+      - duration: "1m"
+        target: 100
+      - duration: "30s"
+        target: 10
+        rampDown: "10s"
+      - duration: "1m"
+        target: 0
+        rampDown: "30s"
+    thresholds:
+      http_req_duration: ["p(95)<3000"]
+      http_req_failed: ["rate<0.10"]
+      iteration_duration: ["p(95)<6000"]
+

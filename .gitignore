@@ -1,0 +1,36 @@
+# Dependencies
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Generated k6 scripts
+k6-script*.js
+*.backup
+
+# Test results
+*.json
+results/
+k6-results/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Temporary files
+*.tmp
+*.log
+.env
+.env.local
+
+# Build artifacts
+dist/
+build/
+
