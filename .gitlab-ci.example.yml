@@ -1,0 +1,107 @@
+# Example GitLab CI configuration for Postman to k6 Load Testing
+# Copy this to .gitlab-ci.yml in your project or use as reference
+
+stages:
+  - test
+
+# Option 1: Include the template file from local repository
+include:
+  - local: 'gitlab-ci-template.yml'
+
+# Option 2: Include from remote URL (uncomment to use)
+# include:
+#   - remote: 'https://raw.githubusercontent.com/your-org/postman-to-k6-action/main/gitlab-ci-template.yml'
+
+# Basic smoke test job
+smoke-test:
+  extends: .postman-to-k6
+  variables:
+    POSTMAN_COLLECTION: "postman/collection.json"
+    LOAD_PROFILE: "smoke"
+  only:
+    - main
+    - merge_requests
+    - schedules
+
+# Run all profiles in parallel using matrix
+load-test-all-profiles:
+  extends: .postman-to-k6
+  parallel:
+    matrix:
+      - LOAD_PROFILE: ["smoke", "load", "stress", "spike"]
+  variables:
+    POSTMAN_COLLECTION: "postman/collection.json"
+  only:
+    - main
+    - schedules
+  when: manual
+
+# Individual profile jobs (optional - for more control)
+load-test:
+  extends: .postman-to-k6
+  variables:
+    POSTMAN_COLLECTION: "postman/collection.json"
+    LOAD_PROFILE: "load"
+  tags:
+    - docker  # Specify runner tags
+  only:
+    - main
+    - schedules
+
+stress-test:
+  extends: .postman-to-k6
+  variables:
+    POSTMAN_COLLECTION: "postman/collection.json"
+    LOAD_PROFILE: "stress"
+    K6_OPTIONS: "--out json=stress-results.json"
+  tags:
+    - self-hosted  # Use self-hosted runner for heavier tests
+  only:
+    - schedules
+  when: manual
+
+# Example with environment file
+load-test-with-env:
+  extends: .postman-to-k6
+  variables:
+    POSTMAN_COLLECTION: "postman/collection.json"
+    ENVIRONMENT_FILE: "postman/environment.json"
+    LOAD_PROFILE: "load"
+  only:
+    - main
+
+# Example with custom profiles config path
+load-test-custom-config:
+  extends: .postman-to-k6
+  variables:
+    POSTMAN_COLLECTION: "postman/collection.json"
+    PROFILES_CONFIG: "custom-profiles.yaml"
+    LOAD_PROFILE: "load"
+  only:
+    - main
+
+# Example: Conditional execution based on branch
+load-test-conditional:
+  extends: .postman-to-k6
+  variables:
+    POSTMAN_COLLECTION: "postman/collection.json"
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+      variables:
+        LOAD_PROFILE: "load"
+    - if: $CI_COMMIT_BRANCH == "develop"
+      variables:
+        LOAD_PROFILE: "smoke"
+    - when: manual
+      variables:
+        LOAD_PROFILE: "stress"
+
+# Example: Using CI/CD variables set in GitLab UI
+# Set these in: Settings → CI/CD → Variables
+# Then just extend the template:
+load-test-from-vars:
+  extends: .postman-to-k6
+  # Variables are automatically picked up from CI/CD Variables
+  only:
+    - main
+

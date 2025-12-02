@@ -1,6 +1,11 @@
-# Postman to k6 GitHub Action
+# Postman to k6 Load Testing
 
-A reusable GitHub Action that automatically converts Postman collections to k6 load testing scripts and executes them with configurable load profiles (smoke, load, stress, spike) on different runners.
+A reusable GitHub Action and GitLab CI template that automatically converts Postman collections to k6 load testing scripts and executes them with configurable load profiles (smoke, load, stress, spike) on different runners.
+
+## CI/CD Platform Support
+
+- **GitHub Actions**: Use as a composite action (see [Usage Guide](USAGE.md))
+- **GitLab CI/CD**: Use as a GitLab CI template (see [GitLab Usage Guide](GITLAB-USAGE.md))
 
 ## Features
 
@@ -221,12 +226,17 @@ See [`.github/workflows/example.yml`](.github/workflows/example.yml) for a compl
 
 ```
 /
-├── action.yml                    # Main composite action definition
+├── action.yml                    # Main composite action definition (GitHub)
+├── .gitlab-ci.yml                # GitLab CI configuration
+├── gitlab-ci-template.yml        # Reusable GitLab CI template
+├── .gitlab-ci.example.yml        # Example GitLab CI workflow
 ├── README.md                     # This file
+├── USAGE.md                      # GitHub Actions usage guide
+├── GITLAB-USAGE.md              # GitLab CI/CD usage guide
 ├── LICENSE                       # MIT License
 ├── .github/
 │   └── workflows/
-│       └── example.yml          # Example workflow
+│       └── example.yml          # Example GitHub workflow
 ├── profiles/
 │   └── load-profiles.yaml       # Load profile configurations
 └── scripts/

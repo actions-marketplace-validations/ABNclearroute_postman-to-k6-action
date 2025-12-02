@@ -1,0 +1,199 @@
+stages:
+  - test
+
+variables:
+  POSTMAN_COLLECTION: "postman/collection.json"
+  LOAD_PROFILE: "smoke"
+  NODE_VERSION: "18"
+  PROFILES_CONFIG: "profiles/load-profiles.yaml"
+  K6_OPTIONS: ""
+  ENVIRONMENT_FILE: ""
+
+# Base template for postman-to-k6 load testing
+.postman-to-k6-base:
+  stage: test
+  image: node:${NODE_VERSION}
+  before_script:
+    # Install postman-to-k6 converter
+    - npm install -g @apideck/postman-to-k6
+    # Install system dependencies and tools
+    - apt-get update -qq && apt-get install -y -qq curl jq > /dev/null
+    # Install yq for YAML parsing
+    - |
+      YQ_VERSION=$(curl -s https://api.github.com/repos/mikefarah/yq/releases/latest | grep tag_name | cut -d '"' -f 4)
+      curl -sSfL "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/yq_linux_amd64" -o /usr/local/bin/yq
+      chmod +x /usr/local/bin/yq
+    # Install k6
+    - |
+      K6_VERSION="v0.47.0"
+      curl -sSfL "https://github.com/grafana/k6/releases/download/${K6_VERSION}/k6-${K6_VERSION}-linux-amd64.tar.gz" -o /tmp/k6.tar.gz
+      tar -xzf /tmp/k6.tar.gz -C /tmp
+      cp /tmp/k6-${K6_VERSION}-linux-amd64/k6 /usr/local/bin/k6
+      chmod +x /usr/local/bin/k6
+      rm -rf /tmp/k6*
+  script:
+    # Validate Postman collection
+    - |
+      if [ ! -f "$POSTMAN_COLLECTION" ]; then
+        echo "Error: Postman collection file not found at $POSTMAN_COLLECTION"
+        exit 1
+      fi
+      if ! jq empty "$POSTMAN_COLLECTION" 2>/dev/null; then
+        echo "Error: Invalid JSON format in Postman collection"
+        exit 1
+      fi
+      echo "Postman collection validated successfully"
+    # Convert Postman collection to k6 script
+    - |
+      OUTPUT_FILE="k6-script-$(date +%s).js"
+      ENV_FLAG=""
+      if [ -n "$ENVIRONMENT_FILE" ] && [ -f "$ENVIRONMENT_FILE" ]; then
+        ENV_FLAG="--environment $ENVIRONMENT_FILE"
+      fi
+      echo "Converting Postman collection to k6 script..."
+      postman-to-k6 "$POSTMAN_COLLECTION" -o "$OUTPUT_FILE" $ENV_FLAG
+      if [ ! -f "$OUTPUT_FILE" ]; then
+        echo "Error: Failed to generate k6 script"
+        exit 1
+      fi
+      echo "k6 script generated: $OUTPUT_FILE"
+      echo "$OUTPUT_FILE" > k6-script-path.txt
+    # Prepare load profile configuration
+    - |
+      PROFILE="$LOAD_PROFILE"
+      PROFILES_CONFIG="$PROFILES_CONFIG"
+      if [ ! -f "$PROFILES_CONFIG" ]; then
+        echo "Warning: Profiles config not found, using default smoke profile"
+        echo "--vus 5 --duration 1m" > k6-flags.txt
+        exit 0
+      fi
+      # Check if profile exists
+      PROFILE_EXISTS=$(yq eval ".profiles.$PROFILE" "$PROFILES_CONFIG" 2>/dev/null)
+      if [ "$PROFILE_EXISTS" == "null" ] || [ -z "$PROFILE_EXISTS" ]; then
+        echo "Warning: Profile '$PROFILE' not found in config, falling back to smoke"
+        PROFILE="smoke"
+      fi
+      echo "$PROFILE" > profile-name.txt
+      # Generate stages array for k6 as proper JSON
+      STAGES_COUNT=$(yq eval ".profiles.$PROFILE.stages | length" "$PROFILES_CONFIG")
+      if [ "$STAGES_COUNT" -gt 0 ]; then
+        mkdir -p .k6-config
+        STAGES_FILE=".k6-config/stages.json"
+        THRESHOLDS_FILE=".k6-config/thresholds.json"
+        yq eval -o=json ".profiles.$PROFILE.stages" "$PROFILES_CONFIG" > "$STAGES_FILE"
+        yq eval -o=json ".profiles.$PROFILE.thresholds" "$PROFILES_CONFIG" > "$THRESHOLDS_FILE"
+      fi
+    # Merge k6 script with profile configuration
+    - |
+      SCRIPT_FILE=$(cat k6-script-path.txt)
+      STAGES_FILE=".k6-config/stages.json"
+      THRESHOLDS_FILE=".k6-config/thresholds.json"
+      PROFILE_NAME=$(cat profile-name.txt 2>/dev/null || echo "$LOAD_PROFILE")
+      if [ -f "$STAGES_FILE" ] && [ -f "$THRESHOLDS_FILE" ]; then
+        STAGES_JSON=$(cat "$STAGES_FILE")
+        THRESHOLDS_JSON=$(cat "$THRESHOLDS_FILE")
+        if [ -n "$STAGES_JSON" ] && [ "$STAGES_JSON" != "null" ] && [ "$STAGES_JSON" != "" ]; then
+          MERGE_SCRIPT=""
+          for path in "scripts/merge-k6-options.js" "./scripts/merge-k6-options.js"; do
+            if [ -f "$path" ]; then
+              MERGE_SCRIPT="$path"
+              break
+            fi
+          done
+          if [ -n "$MERGE_SCRIPT" ] && [ -f "$MERGE_SCRIPT" ]; then
+            echo "Using merge script: $MERGE_SCRIPT"
+            node "$MERGE_SCRIPT" "$SCRIPT_FILE" "$STAGES_JSON" "$THRESHOLDS_JSON" "$PROFILE_NAME"
+          else
+            echo "Warning: merge-k6-options.js not found, using inline merge logic"
+            node -e "
+              const fs = require('fs');
+              let content = fs.readFileSync('$SCRIPT_FILE', 'utf8');
+              const stages = JSON.parse('$STAGES_JSON');
+              const thresholds = JSON.parse('$THRESHOLDS_JSON');
+              const optionsBlock = \`// Load profile: $PROFILE_NAME
+        export const options = {
+          stages: \${JSON.stringify(stages, null, 2)},
+          thresholds: \${JSON.stringify(thresholds, null, 2)},
+        };\`;
+              if (/export\\s+(const|let|var)\\s+options\\s*=/.test(content)) {
+                content = content.replace(/export\\s+(const|let|var)\\s+options\\s*=\\s*\\{[^}]*\\};?/s, optionsBlock);
+              } else {
+                const lines = content.split('\\n');
+                let lastImport = -1;
+                for (let i = 0; i < lines.length; i++) {
+                  if (/^(import|const.*require|export.*from)/.test(lines[i])) lastImport = i;
+                }
+                if (lastImport >= 0) {
+                  lines.splice(lastImport + 1, 0, '', optionsBlock);
+                  content = lines.join('\\n');
+                } else {
+                  content = optionsBlock + '\\n\\n' + content;
+                }
+              }
+              fs.writeFileSync('$SCRIPT_FILE', content, 'utf8');
+            "
+          fi
+        fi
+      fi
+    # Run k6 test
+    - |
+      SCRIPT_FILE=$(cat k6-script-path.txt)
+      ADDITIONAL_OPTIONS="$K6_OPTIONS"
+      echo "Running k6 test with profile: $LOAD_PROFILE"
+      echo "Script: $SCRIPT_FILE"
+      if k6 run $ADDITIONAL_OPTIONS "$SCRIPT_FILE"; then
+        echo "status=success" > test-status.txt
+      else
+        echo "status=failure" > test-status.txt
+        exit 1
+      fi
+  artifacts:
+    name: "k6-results-${LOAD_PROFILE}-${CI_PIPELINE_ID}"
+    paths:
+      - k6-script*.js
+      - .k6-config/
+      - k6-script-path.txt
+      - test-status.txt
+      - profile-name.txt
+    expire_in: 30 days
+    when: always
+    reports:
+      # Optional: JUnit report if k6 generates it
+      junit: k6-results.xml
+  after_script:
+    - |
+      if [ -f test-status.txt ]; then
+        cat test-status.txt
+      fi
+
+# Job definition for smoke test
+postman-to-k6-smoke:
+  extends: .postman-to-k6-base
+  variables:
+    LOAD_PROFILE: "smoke"
+
+# Job definition for load test
+postman-to-k6-load:
+  extends: .postman-to-k6-base
+  variables:
+    LOAD_PROFILE: "load"
+
+# Job definition for stress test
+postman-to-k6-stress:
+  extends: .postman-to-k6-base
+  variables:
+    LOAD_PROFILE: "stress"
+
+# Job definition for spike test
+postman-to-k6-spike:
+  extends: .postman-to-k6-base
+  variables:
+    LOAD_PROFILE: "spike"
+
+# Example: Run all profiles in parallel using matrix (GitLab 13.5+)
+postman-to-k6-all-profiles:
+  extends: .postman-to-k6-base
+  parallel:
+    matrix:
+      - LOAD_PROFILE: ["smoke", "load", "stress", "spike"]
+
